@@ -90,6 +90,7 @@ function command.REMOVE(_, handle, kill)
 	return NORET
 end
 
+---comment 启动一个服务，并且把服务的 handle 保存，以备别的服务查询
 local function launch_service(service, ...)
 	local param = table.concat({...}, " ")
 	local inst = skynet.launch(service, param)

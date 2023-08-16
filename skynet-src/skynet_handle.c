@@ -234,6 +234,10 @@ _insert_name(struct handle_storage *s, const char * name, uint32_t handle) {
 	return result;
 }
 
+/// @brief 服务上下文的句柄和某个字符串名称绑定（其他服务可以使用该名称来获取这个服务的句柄，该名称能直接用于和其他服务间进行通信）
+/// @param handle 服务上下文的句柄
+/// @param name 
+/// @return 
 const char * 
 skynet_handle_namehandle(uint32_t handle, const char *name) {
 	rwlock_wlock(&H->lock);

@@ -83,6 +83,7 @@ int sigign() {
 	return 0;
 }
 
+/* 解析配置文件的 lua 脚本代码块 */
 static const char * load_config = "\
 	local result = {}\n\
 	local function getenv(name) return assert(os.getenv(name), [[os.getenv() failed: ]] .. name) end\n\
@@ -118,17 +119,17 @@ int
 main(int argc, char *argv[]) {
 	const char * config_file = NULL ;
 	if (argc > 1) {
-		config_file = argv[1];
+		config_file = argv[1];	// 启动skynet时传入的配置文件路径
 	} else {
 		fprintf(stderr, "Need a config file. Please read skynet wiki : https://github.com/cloudwu/skynet/wiki/Config\n"
 			"usage: skynet configfilename\n");
 		return 1;
 	}
 
-	skynet_globalinit();
-	skynet_env_init();
+	skynet_globalinit();		// 全局G_NODE数据初始化
+	skynet_env_init();			// 初始化lua环境，创建一个全局数据结构struct skynet_env *E，并初始化
 
-	sigign();
+	sigign();					// 信号处理 忽略SIGPIPE
 
 	struct skynet_config config;
 
@@ -137,21 +138,23 @@ main(int argc, char *argv[]) {
 	luaL_initcodecache();
 #endif
 
-	struct lua_State *L = luaL_newstate();
-	luaL_openlibs(L);	// link lua lib
+	struct lua_State *L = luaL_newstate();	// 申请一个 lua 虚拟机来加载配置用
+	luaL_openlibs(L);	// link lua lib （链接一些必要的lua库到刚刚申请的 lua 虚拟机中）
 
+	// 将用于解析配置文件的 lua 代码块加载到虚拟机中
 	int err =  luaL_loadbufferx(L, load_config, strlen(load_config), "=[skynet config]", "t");
 	assert(err == LUA_OK);
-	lua_pushstring(L, config_file);
+	lua_pushstring(L, config_file);		// 压入要解析的配置文件
 
-	err = lua_pcall(L, 1, 1, 0);
+	err = lua_pcall(L, 1, 1, 0);		// 执行配置文件解析代码，解析 config_file
 	if (err) {
 		fprintf(stderr,"%s\n",lua_tostring(L,-1));
 		lua_close(L);
 		return 1;
 	}
-	_init_env(L);
+	_init_env(L);	// 将配 config_file 的解析结果，从 lua 栈中取出并写入到环境变量中
 
+	// 从环境变量中读取配置，赋值 config 结构
 	config.thread =  optint("thread",8);
 	config.module_path = optstring("cpath","./cservice/?.so");
 	config.harbor = optint("harbor", 1);
@@ -161,10 +164,10 @@ main(int argc, char *argv[]) {
 	config.logservice = optstring("logservice", "logger");
 	config.profile = optboolean("profile", 1);
 
-	lua_close(L);
+	lua_close(L);	// 配置加载完毕，关闭这个 lua 虚拟机
 
-	skynet_start(&config);
-	skynet_globalexit();
+	skynet_start(&config);	// 正式启动skynet服务程序
+	skynet_globalexit();	// 对应上面的skynet_globalinit()，销毁全局数据
 
 	return 0;
 }

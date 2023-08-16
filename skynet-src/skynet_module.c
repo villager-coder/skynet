@@ -10,13 +10,14 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define MAX_MODULE_TYPE 32
+#define MAX_MODULE_TYPE 32		// 最大只支持注册32个module
 
+/* 全局的 module 管理器 */
 struct modules {
-	int count;
+	int count;				// 已加载的module总数量
 	struct spinlock lock;
-	const char * path;
-	struct skynet_module m[MAX_MODULE_TYPE];
+	const char * path;		// 加载目录，即所有需要加载的.so库目录（配置文件中 cpath 配置项）
+	struct skynet_module m[MAX_MODULE_TYPE];	// 全部的 module
 };
 
 static struct modules * M = NULL;
@@ -32,11 +33,13 @@ _try_open(struct modules *m, const char * name) {
 	//search path
 	void * dl = NULL;
 	char tmp[sz];
+
+	// 循环遍历每个目录，尝试加载名为name的.so动态库
 	do
 	{
 		memset(tmp,0,sz);
 		while (*path == ';') path++;
-		if (*path == '\0') break;
+		if (*path == '\0') break;	// 所有目录都已经查找完了，则跳出循环
 		l = strchr(path, ';');
 		if (l == NULL) l = path + strlen(path);
 		int len = l - path;
@@ -51,7 +54,7 @@ _try_open(struct modules *m, const char * name) {
 			fprintf(stderr,"Invalid C service path\n");
 			exit(1);
 		}
-		dl = dlopen(tmp, RTLD_NOW | RTLD_GLOBAL);
+		dl = dlopen(tmp, RTLD_NOW | RTLD_GLOBAL);	// RTLD_NOW（立即加载符号）RTLD_GLOBAL（将共享库中的符号导出，供其他共享库使用）
 		path = l;
 	}while(dl == NULL);
 
@@ -73,6 +76,8 @@ _query(const char * name) {
 	return NULL;
 }
 
+/// @brief 获取模块中指定api函数的地址
+/// @return 
 static void *
 get_api(struct skynet_module *mod, const char *api_name) {
 	size_t name_size = strlen(mod->name);
@@ -96,9 +101,11 @@ open_sym(struct skynet_module *mod) {
 	mod->release = get_api(mod, "_release");
 	mod->signal = get_api(mod, "_signal");
 
-	return mod->init == NULL;
+	return mod->init == NULL;	// 返回xxx_init接口的地址，即如果自定义module，则xxx_init接口必须提供
 }
 
+/// @brief 通过 module 名字获取 module 
+/// @param string module name
 struct skynet_module * 
 skynet_module_query(const char * name) {
 	struct skynet_module * result = _query(name);
@@ -107,12 +114,13 @@ skynet_module_query(const char * name) {
 
 	SPIN_LOCK(M)
 
-	result = _query(name); // double check
+	result = _query(name); // double check （加锁后再次检查，目标module是否已加载）
 
 	if (result == NULL && M->count < MAX_MODULE_TYPE) {
 		int index = M->count;
-		void * dl = _try_open(M,name);
+		void * dl = _try_open(M,name);	// 尝试加载对应module的动态链接库，获得句柄
 		if (dl) {
+			// 打开动态库成功，临时保存名字和句柄给 open_sym 使用
 			M->m[index].name = name;
 			M->m[index].module = dl;
 
@@ -129,6 +137,8 @@ skynet_module_query(const char * name) {
 	return result;
 }
 
+/// @brief 调用skynet_module的create接口，也就是目标.so库中提供的xxx_create接口
+/// @return 如果目标.so库没有提供xxx_create接口，返回NULL
 void * 
 skynet_module_instance_create(struct skynet_module *m) {
 	if (m->create) {
@@ -138,11 +148,16 @@ skynet_module_instance_create(struct skynet_module *m) {
 	}
 }
 
+/// @brief 初始化module数据实例
+/// @param inst 待初始化的实例，通过skynet_module_instance_create创建的
+/// @return 
 int
 skynet_module_instance_init(struct skynet_module *m, void * inst, struct skynet_context *ctx, const char * parm) {
 	return m->init(inst, ctx, parm);
 }
 
+/// @brief 释放module数据实例
+/// @param inst 
 void 
 skynet_module_instance_release(struct skynet_module *m, void *inst) {
 	if (m->release) {

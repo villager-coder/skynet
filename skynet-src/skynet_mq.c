@@ -18,20 +18,22 @@
 #define MQ_IN_GLOBAL 1
 #define MQ_OVERLOAD 1024
 
+/* 消息队列 */
 struct message_queue {
 	struct spinlock lock;
-	uint32_t handle;
-	int cap;
-	int head;
-	int tail;
-	int release;
-	int in_global;
-	int overload;
-	int overload_threshold;
-	struct skynet_message *queue;
-	struct message_queue *next;
+	uint32_t handle;				// 消息队列的 handle
+	int cap;						// 容量
+	int head;						// 消息的头指针
+	int tail;						// 消息的尾指针
+	int release;					// 标记是否已经被释放
+	int in_global;					// 标记是否在全局队列中
+	int overload;					// 现在的负载
+	int overload_threshold;			// 超载警告的阈值
+	struct skynet_message *queue;	// 消息队列数组
+	struct message_queue *next;		// 下一个消息队列，链表结构
 };
 
+/* 全局队列，一个链表，一个节点对应一个服务的私有消息队列 */
 struct global_queue {
 	struct message_queue *head;
 	struct message_queue *tail;

@@ -26,6 +26,8 @@ local coroutine_yield = coroutine.yield
 local coroutine_create = coroutine.create
 
 local proto = {}
+
+-- 进程管理器字典
 local skynet = {
 	-- read skynet.h
 	PTYPE_TEXT = 0,
@@ -604,7 +606,9 @@ function skynet.call(addr, typename, ...)
 		c.send(addr, skynet.PTYPE_TRACE, 0, tag)
 	end
 
+	-- 获取服务的处理进程
 	local p = proto[typename]
+	-- 过 skynet.core 这个C模块的 send 功能，向指定服务发送数据
 	local session = c.send(addr, p.id , nil , p.pack(...))
 	if session == nil then
 		error("call to invalid address " .. skynet.address(addr))
@@ -863,11 +867,20 @@ function skynet.dispatch_message(...)
 	assert(succ, tostring(err))
 end
 
+---comment 创建普通服务
+---@param name string 服务名（服务的lua脚本名，如"main" -> main.lua）
+---@return unknown 
 function skynet.newservice(name, ...)
+	-- 通过 skynet.call (异步变同步)，向 laucher 服务（源码是laucher.lua）发送一个 LAUNCH 消息，阻塞等待创建结果
 	return skynet.call(".launcher", "lua" , "LAUNCH", "snlua", name, ...)
 end
 
+---comment 创建全局唯一的服务（单例）
+---@param global boolean 为 true 时此服务在所有节点之间唯一
+---@return unknown
 function skynet.uniqueservice(global, ...)
+	-- 通过 skynet.call (异步变同步)，让 service_mgr 服务创建目标服务
+	-- 假如 service_mgr 已有创建则直接返回服务地址，否则阻塞等待创建结果
 	if global == true then
 		return assert(skynet.call(".service", "lua", "GLAUNCH", ...))
 	else
@@ -875,6 +888,9 @@ function skynet.uniqueservice(global, ...)
 	end
 end
 
+---comment 查询全局服务
+---@param global boolean 为 true 时如果还没有创建过目标服务则一直等下去，直到目标服务被(其他服务触发而)创建
+---@return unknown
 function skynet.queryservice(global, ...)
 	if global == true then
 		return assert(skynet.call(".service", "lua", "GQUERY", ...))
@@ -949,7 +965,10 @@ function skynet.init_service(start)
 	end
 end
 
+---comment 每个lua服务的启动入口
+---@param start_func any
 function skynet.start(start_func)
+	-- 重新注册一个callback函数，并且指定收到消息时由dispatch_message分发
 	c.callback(skynet.dispatch_message)
 	init_thread = skynet.timeout(0, function()
 		skynet.init_service(start_func)

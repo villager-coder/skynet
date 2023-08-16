@@ -9,8 +9,8 @@
 #include <assert.h>
 
 struct skynet_env {
-	struct spinlock lock;
-	lua_State *L;
+	struct spinlock lock;	// 锁
+	lua_State *L;			// 一个专门用于管理lua环境变量的lua虚拟机
 };
 
 static struct skynet_env *E = NULL;

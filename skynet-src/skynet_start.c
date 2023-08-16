@@ -18,19 +18,20 @@
 #include <string.h>
 #include <signal.h>
 
+/* 监控器，用于监控所有worker线程状态的结构体 */
 struct monitor {
-	int count;
-	struct skynet_monitor ** m;
+	int count;						// skynet的worker线程总量
+	struct skynet_monitor ** m;		// 次级监控器列表，一个监控器监控一个worker线程
 	pthread_cond_t cond;
 	pthread_mutex_t mutex;
-	int sleep;
+	int sleep;						// 睡眠中的线程数数量
 	int quit;
 };
 
 struct worker_parm {
 	struct monitor *m;
 	int id;
-	int weight;
+	int weight;				// worker 线程每次处理的工作量权重
 };
 
 static volatile int SIG = 0;
@@ -160,14 +161,14 @@ thread_worker(void *p) {
 	skynet_initthread(THREAD_WORKER);
 	struct message_queue * q = NULL;
 	while (!m->quit) {
-		q = skynet_context_message_dispatch(sm, q, weight);
+		q = skynet_context_message_dispatch(sm, q, weight);	// 从消息队列中取消息
 		if (q == NULL) {
 			if (pthread_mutex_lock(&m->mutex) == 0) {
 				++ m->sleep;
 				// "spurious wakeup" is harmless,
 				// because skynet_context_message_dispatch() can be call at any time.
 				if (!m->quit)
-					pthread_cond_wait(&m->cond, &m->mutex);
+					pthread_cond_wait(&m->cond, &m->mutex);		// 没有活跃的消息就休眠
 				-- m->sleep;
 				if (pthread_mutex_unlock(&m->mutex)) {
 					fprintf(stderr, "unlock mutex error");
@@ -179,6 +180,8 @@ thread_worker(void *p) {
 	return NULL;
 }
 
+/// @brief 启动全部线程
+/// @param thread worker线程数量
 static void
 start(int thread) {
 	pthread_t pid[thread+3];
@@ -188,6 +191,7 @@ start(int thread) {
 	m->count = thread;
 	m->sleep = 0;
 
+	// 每条 worker 线程分配一个 skynet_monitor 监控
 	m->m = skynet_malloc(thread * sizeof(struct skynet_monitor *));
 	int i;
 	for (i=0;i<thread;i++) {
@@ -202,10 +206,14 @@ start(int thread) {
 		exit(1);
 	}
 
-	create_thread(&pid[0], thread_monitor, m);
-	create_thread(&pid[1], thread_timer, m);
-	create_thread(&pid[2], thread_socket, m);
+	create_thread(&pid[0], thread_monitor, m);	// 过载线程 1个
+	create_thread(&pid[1], thread_timer, m);	// 定时器线程 1个
+	create_thread(&pid[2], thread_socket, m);	// socket线程 1个
 
+	// worker 线程每次处理的工作量权重（是服务队列中消息总数右移的位数，小于 0 的每次只读一条）
+	// 前四个线程每次只处理一条消息
+    // 后面的四个每次处理队列中的全部消息
+    // 再后面分别是每次 1/2，1/4，1/8
 	static int weight[] = { 
 		-1, -1, -1, -1, 0, 0, 0, 0,
 		1, 1, 1, 1, 1, 1, 1, 1, 
@@ -220,7 +228,7 @@ start(int thread) {
 		} else {
 			wp[i].weight = 0;
 		}
-		create_thread(&pid[i+3], thread_worker, &wp[i]);
+		create_thread(&pid[i+3], thread_worker, &wp[i]);	// worker线程 （业务线程）
 	}
 
 	for (i=0;i<thread+3;i++) {
@@ -230,6 +238,9 @@ start(int thread) {
 	free_monitor(m);
 }
 
+/// @brief 加载 bootstrap 引导模块
+/// @param logger 如果加载出错，用于输出的日志服务上下文
+/// @param cmdline 加载命令，例如："snlua bootstrap"，将会加载并运行service/bootstrap.lua
 static void
 bootstrap(struct skynet_context * logger, const char * cmdline) {
 	int sz = strlen(cmdline);
@@ -246,6 +257,11 @@ bootstrap(struct skynet_context * logger, const char * cmdline) {
 	} else {
 		args[0] = '\0';
 	}
+
+	/* skynet_context_new("snlua", "bootstrap");
+	 -> 加载 snlua.so 模块，实例化一个 snlua 服务，根据传入的要实例化的lua服务的脚本名称去获取lua脚本，
+	 这里是 "bootstarp"，则会查找配置的luaservice目录中的bootstrap.lua，如果是默认配置，将会找到service/bootstrap.lua 
+	 snlua 是lua的沙盒服务，所有的 lua 服务 都是一个 snlua 的实例 */ 
 	struct skynet_context *ctx = skynet_context_new(name, args);
 	if (ctx == NULL) {
 		skynet_error(NULL, "Bootstrap error : %s\n", cmdline);
@@ -264,28 +280,47 @@ skynet_start(struct skynet_config * config) {
 	sigaction(SIGHUP, &sa, NULL);
 
 	if (config->daemon) {
+		// 初始化守护进程
 		if (daemon_init(config->daemon)) {
 			exit(1);
 		}
 	}
+
+	// 初始化节点模块，用于集群，转发远程节点的消息
 	skynet_harbor_init(config->harbor);
+
+	// 初始化 handle 存储器，用于给每个Skynet服务创建一个全局唯一的句柄值
 	skynet_handle_init(config->harbor);
+
+	// 初始化全局消息队列
 	skynet_mq_init();
+
+	// 初始化 C 模块管理器，设置查找路径，主要用于加载符合Skynet服务模块接口的动态链接库（.so
 	skynet_module_init(config->module_path);
+
+	// 初始化定时器模块（全局时间）
 	skynet_timer_init();
+
+	// 初始化网络模块（socket管理器）
 	skynet_socket_init();
+
+	// 标记是否开了性能测试
 	skynet_profile_enable(config->profile);
 
+	// 创建并启动 logger C服务
 	struct skynet_context *ctx = skynet_context_new(config->logservice, config->logger);
 	if (ctx == NULL) {
 		fprintf(stderr, "Can't launch %s service\n", config->logservice);
 		exit(1);
 	}
 
+	// 注册 logger 服务的句柄名称，注册后即可通过"logger"拿到logger C服务的上下文句柄
 	skynet_handle_namehandle(skynet_context_handle(ctx), "logger");
 
+	// 加载 bootstrap 引导模块，如果使用默认 config 的配置内容，config->bootstrap 的内容是 "snlua bootstrap"
 	bootstrap(ctx, config->bootstrap);
 
+	// 启动全部线程
 	start(config->thread);
 
 	// harbor_exit may call socket send, so it should exit before socket_free

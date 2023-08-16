@@ -23,15 +23,20 @@
 
 #define MEMORY_WARNING_REPORT (1024 * 1024 * 32)
 
+// 1.写lua代码
+// 2.lua虚拟机词法分析、生成指令集 .byte
+// 3.lua虚拟机执行指令集
+
+// actor
 struct snlua {
-	lua_State * L;
+	lua_State * L;	// lua 虚拟机（沙盒环境）
 	struct skynet_context * ctx;
 	size_t mem;
 	size_t mem_report;
 	size_t mem_limit;
 	lua_State * activeL;
 	ATOM_INT trap;
-};
+}; // lua actor 隔离环境
 
 // LUA_CACHELIB may defined in patched lua for shared proto
 #ifdef LUA_CACHELIB
@@ -422,6 +427,8 @@ init_cb(struct snlua *l, struct skynet_context *ctx, const char * args, size_t s
 	lua_pushcfunction(L, traceback);
 	assert(lua_gettop(L) == 1);
 
+	// 加载并执行 lualib\loader.lua
+	// loader 的作用是去各项代码目录查找指定的lua文件，找到后 loadfile 并执行(等效于 dofile)。
 	const char * loader = optstring(ctx, "lualoader", "./lualib/loader.lua");
 
 	int r = luaL_loadfile(L,loader);
@@ -430,6 +437,7 @@ init_cb(struct snlua *l, struct skynet_context *ctx, const char * args, size_t s
 		report_launcher_error(ctx);
 		return 1;
 	}
+	// args 即要查找并执行的lua文件名，如 "bootstrap"
 	lua_pushlstring(L, args, sz);
 	r = lua_pcall(L,1,0,1);
 	if (r != LUA_OK) {
@@ -456,7 +464,9 @@ static int
 launch_cb(struct skynet_context * context, void *ud, int type, int session, uint32_t source , const void * msg, size_t sz) {
 	assert(type == 0 && session == 0);
 	struct snlua *l = ud;
+	// 将服务原本绑定的句柄和回调函数清空（即注销C语言层面的回调函数，使它不再接收消息）
 	skynet_callback(context, NULL, NULL);
+	// 注册lua语言层的回调函数，把消息通过lua接口来接收，控制权就开始转到lua层
 	int err = init_cb(l, context, msg, sz);
 	if (err) {
 		skynet_command(context, "EXIT", NULL);
@@ -465,15 +475,21 @@ launch_cb(struct skynet_context * context, void *ud, int type, int session, uint
 	return 0;
 }
 
+/// @brief 初始化
+/// @param l 	snlua 沙盒环境
+/// @param ctx 	要在该沙盒中运行的 lua 服务上下文
+/// @param args 服务运行参数，如："bootstrap "
+/// @return 
 int
 snlua_init(struct snlua *l, struct skynet_context *ctx, const char * args) {
 	int sz = strlen(args);
 	char * tmp = skynet_malloc(sz);
 	memcpy(tmp, args, sz);
+	// 注册回调函数 launch_cb，有消息传入时会调用回调函数并处理
 	skynet_callback(ctx, l , launch_cb);
 	const char * self = skynet_command(ctx, "REG", NULL);
 	uint32_t handle_id = strtoul(self+1, NULL, 16);
-	// it must be first message
+	// it must be first message （给自己发送一条消息，内容是为args字符串）
 	skynet_send(ctx, 0, handle_id, PTYPE_TAG_DONTCOPY,0, tmp, sz);
 	return 0;
 }
@@ -498,13 +514,14 @@ lalloc(void * ud, void *ptr, size_t osize, size_t nsize) {
 	return skynet_lalloc(ptr, osize, nsize);
 }
 
+/// @brief snlua 模块的实例化方法
 struct snlua *
 snlua_create(void) {
 	struct snlua * l = skynet_malloc(sizeof(*l));
 	memset(l,0,sizeof(*l));
 	l->mem_report = MEMORY_WARNING_REPORT;
 	l->mem_limit = 0;
-	l->L = lua_newstate(lalloc, l);
+	l->L = lua_newstate(lalloc, l);	// 创建虚拟机，生成沙盒环境
 	l->activeL = NULL;
 	ATOM_INIT(&l->trap , 0);
 	return l;

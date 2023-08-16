@@ -39,32 +39,35 @@
 
 #endif
 
+/* skynet 服务上下文（C Actor 隔离环境），用于管理一个服务的生命周期和消息处理等操作 */
 struct skynet_context {
-	void * instance;
-	struct skynet_module * mod;
-	void * cb_ud;
-	skynet_cb cb;
-	struct message_queue *queue;
-	ATOM_POINTER logfile;
-	uint64_t cpu_cost;	// in microsec
-	uint64_t cpu_start;	// in microsec
-	char result[32];
-	uint32_t handle;
-	int session_id;
-	ATOM_INT ref;
-	int message_count;
-	bool init;
-	bool endless;
-	bool profile;
+	void * instance;				// module数据实例
+	struct skynet_module * mod;		// 通过哪个 skynet_module 创建的
+	void * cb_ud;					// callback userdata
+	skynet_cb cb;					// 回调函数
+	struct message_queue *queue;	// 服务私有的消息队列
+	ATOM_POINTER logfile;			// 文件指针是个原子指针
+	uint64_t cpu_cost;				// in microsec	// 消耗的总 cpu 时间
+	uint64_t cpu_start;				// in microsec	// 本次消息处理的起始时间点
+	char result[32];				// 用来保存处理结果
+	uint32_t handle;				// 服务句柄; 用来完成  服务名字 → handle 和 handle → 服务 的映射
+	int session_id;					// 消息的 session id 分配器，不断累加
+	ATOM_INT ref;					// 引用计数（当计数为0时将会删除服务）
+	int message_count;				// 处理过的消息总数
+	bool init;						// 初始化完成标记
+	bool endless;					// 死循环标志
+	bool profile;					// 是否开启了 profile
 
 	CHECKCALLING_DECL
 };
+// worker 线程会不断为消息队列 queue 中每个消息调用回调函数 cb 进行处理。
+
 
 struct skynet_node {
 	ATOM_INT total;
 	int init;
 	uint32_t monitor_exit;
-	pthread_key_t handle_key;
+	pthread_key_t handle_key;	// 线程特定数据
 	bool profile;	// default is on
 };
 
@@ -121,13 +124,19 @@ drop_message(struct skynet_message *msg, void *ud) {
 	skynet_send(NULL, source, msg->source, PTYPE_ERROR, 0, NULL, 0);
 }
 
+/// @brief 创建一个新的服务上下文
+/// @param name 加载模块的名称（module name）
+/// @param param 需要传递给 module 的 xxx_init 函数的额外参数，没有传NULL
+/// @return 
 struct skynet_context * 
 skynet_context_new(const char * name, const char *param) {
+	// 通过名字获取已加载的module
 	struct skynet_module * mod = skynet_module_query(name);
 
 	if (mod == NULL)
 		return NULL;
 
+	// 调用 module 提供的 xxx_create 接口创建一份数据实例，保存到 skynet_context 的 instance 字段中
 	void *inst = skynet_module_instance_create(mod);
 	if (inst == NULL)
 		return NULL;
@@ -150,21 +159,22 @@ skynet_context_new(const char * name, const char *param) {
 	ctx->message_count = 0;
 	ctx->profile = G_NODE.profile;
 	// Should set to 0 first to avoid skynet_handle_retireall get an uninitialized handle
-	ctx->handle = 0;	
+	ctx->handle = 0;
+	// 给该服务注册一个handle
 	ctx->handle = skynet_handle_register(ctx);
-	struct message_queue * queue = ctx->queue = skynet_mq_create(ctx->handle);
+	struct message_queue * queue = ctx->queue = skynet_mq_create(ctx->handle);	// 创建这个实例的消息队列
 	// init function maybe use ctx->handle, so it must init at last
 	context_inc();
 
 	CHECKCALLING_BEGIN(ctx)
-	int r = skynet_module_instance_init(mod, inst, ctx, param);
+	int r = skynet_module_instance_init(mod, inst, ctx, param);		// 调用module数据实例
 	CHECKCALLING_END(ctx)
 	if (r == 0) {
 		struct skynet_context * ret = skynet_context_release(ctx);
 		if (ret) {
 			ctx->init = true;
 		}
-		skynet_globalmq_push(queue);
+		skynet_globalmq_push(queue);	// 将实例的消息队列加到全局的消息队列中，这样才能收到消息回调
 		if (ret) {
 			skynet_error(ret, "LAUNCH %s %s", name, param ? param : "");
 		}
@@ -191,11 +201,15 @@ skynet_context_newsession(struct skynet_context *ctx) {
 	return session;
 }
 
+/// @brief 服务引用计数+1
+/// @param ctx 
 void 
 skynet_context_grab(struct skynet_context *ctx) {
 	ATOM_FINC(&ctx->ref);
 }
 
+/// @brief 服务引用计数-1
+/// @param ctx 
 void
 skynet_context_reserve(struct skynet_context *ctx) {
 	skynet_context_grab(ctx);
@@ -204,6 +218,8 @@ skynet_context_reserve(struct skynet_context *ctx) {
 	context_dec();
 }
 
+/// @brief 删除服务
+/// @param ctx 
 static void 
 delete_context(struct skynet_context *ctx) {
 	FILE *f = (FILE *)ATOM_LOAD(&ctx->logfile);
@@ -297,14 +313,14 @@ skynet_context_dispatchall(struct skynet_context * ctx) {
 struct message_queue * 
 skynet_context_message_dispatch(struct skynet_monitor *sm, struct message_queue *q, int weight) {
 	if (q == NULL) {
-		q = skynet_globalmq_pop();
+		q = skynet_globalmq_pop();		// 从全局消息队列取
 		if (q==NULL)
 			return NULL;
 	}
 
-	uint32_t handle = skynet_mq_handle(q);
+	uint32_t handle = skynet_mq_handle(q);	// actor 的句柄
 
-	struct skynet_context * ctx = skynet_handle_grab(handle);
+	struct skynet_context * ctx = skynet_handle_grab(handle);	// 查找actor
 	if (ctx == NULL) {
 		struct drop_t d = { handle };
 		skynet_mq_release(q, drop_message, &d);
@@ -315,9 +331,17 @@ skynet_context_message_dispatch(struct skynet_monitor *sm, struct message_queue 
 	struct skynet_message msg;
 
 	for (i=0;i<n;i++) {
+		// 从actor专属消息队列取消息
 		if (skynet_mq_pop(q,&msg)) {
 			skynet_context_release(ctx);
 			return skynet_globalmq_pop();
+		/*
+		// 根据权重表取消息，为了打乱线程
+		1、 weight < 0 只取出一个消息进行处理
+		2、 weight == 0 取出全部消息进行处理
+		3、  weight == 1 取出一半消息进行处理
+		4、  weight == 1 取出1/4消息进行处理
+		*/
 		} else if (i==0 && weight >= 0) {
 			n = skynet_mq_length(q);
 			n >>= weight;
@@ -783,11 +807,18 @@ skynet_sendname(struct skynet_context * context, uint32_t source, const char * a
 	return skynet_send(context, source, des, type, session, data, sz);
 }
 
+/// @brief 获取服务上下文的句柄
+/// @param ctx 服务上下文
+/// @return 
 uint32_t 
 skynet_context_handle(struct skynet_context *ctx) {
 	return ctx->handle;
 }
 
+/// @brief 服务回调函数注册
+/// @param context 服务上下文
+/// @param ud (user data)用户自定义的数据，可以用于在回调函数中传递额外的参数或上下文信息
+/// @param cb 回调函数
 void 
 skynet_callback(struct skynet_context * context, void *ud, skynet_cb cb) {
 	context->cb = cb;

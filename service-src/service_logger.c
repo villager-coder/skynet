@@ -11,7 +11,7 @@ struct logger {
 	char * filename;
 	uint32_t starttime;
 	int close;
-};
+};	// actor 隔离环境
 
 struct logger *
 logger_create(void) {
