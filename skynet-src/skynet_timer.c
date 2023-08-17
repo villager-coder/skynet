@@ -21,6 +21,7 @@ typedef void (*timer_execute_func)(void *ud,void *arg);
 #define TIME_NEAR_MASK (TIME_NEAR-1)
 #define TIME_LEVEL_MASK (TIME_LEVEL-1)
 
+/**/
 struct timer_event {
 	uint32_t handle;
 	int session;
@@ -41,8 +42,8 @@ struct timer {
 	struct link_list t[4][TIME_LEVEL];
 	struct spinlock lock;
 	uint32_t time;
-	uint32_t starttime;
-	uint64_t current;
+	uint32_t starttime;			// skynet 进程启动时间
+	uint64_t current;			// 进程启动到现在的相对时间（由于timer线程会sleep 2.5ms，因此这个时间是个近似时间，精度为2.5ms）
 	uint64_t current_point;
 };
 

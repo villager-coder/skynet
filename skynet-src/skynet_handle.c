@@ -11,26 +11,31 @@
 #define DEFAULT_SLOT_SIZE 4
 #define MAX_SLOT_SIZE 0x40000000
 
+/* 服务名字 <-> 服务handle 映射关系 */
 struct handle_name {
-	char * name;
-	uint32_t handle;
+	char * name;		// 服务名字
+	uint32_t handle;	// 服务handle
 };
 
+/* handle管理器 */
 struct handle_storage {
-	struct rwlock lock;
+	struct rwlock lock;				// 读写锁（因为读频率远远大于写）
 
-	uint32_t harbor;
-	uint32_t handle_index;
-	int slot_size;
-	struct skynet_context ** slot;
+	uint32_t harbor;				// 本节点的 harbor id
+	uint32_t handle_index;			// 当前可分配索引值（上一次成功分配的handle值+1）
+	int slot_size;					// slot数组长度
+	struct skynet_context ** slot;	// 本节点上的所有服务的上下文地址（动态数组，每次扩容长度翻倍）
 	
-	int name_cap;
-	int name_count;
-	struct handle_name *name;
+	int name_cap;					// name容量
+	int name_count;					// name长度
+	struct handle_name *name;		// 存储所有 服务名字<->服务handle 映射关系集合（一个有序数组，根据服务名字排序）
 };
 
-static struct handle_storage *H = NULL;
+static struct handle_storage *H = NULL;		// 一个skynet进程，一个handle管理器
 
+/// @brief 服务注册
+/// @param ctx 
+/// @return 返回给服务分配的handle句柄
 uint32_t
 skynet_handle_register(struct skynet_context *ctx) {
 	struct handle_storage *s = H;
@@ -40,9 +45,11 @@ skynet_handle_register(struct skynet_context *ctx) {
 	for (;;) {
 		int i;
 		uint32_t handle = s->handle_index;
+
+		// 由于服务退出后，slot中数据回收但handle值不会回收，导致slot空洞问题，因此使用循环遍历找一个空位置放服务数据
 		for (i=0;i<s->slot_size;i++,handle++) {
 			if (handle > HANDLE_MASK) {
-				// 0 is reserved
+				// 0 is reserved	// 当 handle 超过 16777215 以后，handle 会从 1 再次开始
 				handle = 1;
 			}
 			int hash = handle & (s->slot_size-1);
@@ -56,7 +63,7 @@ skynet_handle_register(struct skynet_context *ctx) {
 				return handle;
 			}
 		}
-		assert((s->slot_size*2 - 1) <= HANDLE_MASK);
+		assert((s->slot_size*2 - 1) <= HANDLE_MASK);	// 两倍扩容
 		struct skynet_context ** new_slot = skynet_malloc(s->slot_size * 2 * sizeof(struct skynet_context *));
 		memset(new_slot, 0, s->slot_size * 2 * sizeof(struct skynet_context *));
 		for (i=0;i<s->slot_size;i++) {
@@ -135,6 +142,7 @@ skynet_handle_retireall() {
 	}
 }
 
+/// @brief 通过服务handle 获取 服务的地址
 struct skynet_context * 
 skynet_handle_grab(uint32_t handle) {
 	struct handle_storage *s = H;
@@ -214,12 +222,13 @@ static const char *
 _insert_name(struct handle_storage *s, const char * name, uint32_t handle) {
 	int begin = 0;
 	int end = s->name_count - 1;
+	// 因为s->name是有序数组，这里用二分查找法查找合适的位置插入
 	while (begin<=end) {
 		int mid = (begin+end)/2;
 		struct handle_name *n = &s->name[mid];
 		int c = strcmp(n->name, name);
 		if (c==0) {
-			return NULL;
+			return NULL;		// 服务名字全局唯一，这里名字重复不会覆盖，返回NULL
 		}
 		if (c<0) {
 			begin = mid + 1;
@@ -234,7 +243,7 @@ _insert_name(struct handle_storage *s, const char * name, uint32_t handle) {
 	return result;
 }
 
-/// @brief 服务上下文的句柄和某个字符串名称绑定（其他服务可以使用该名称来获取这个服务的句柄，该名称能直接用于和其他服务间进行通信）
+/// @brief 服务handle和某个字符串名称绑定（其他服务可以使用该名称来获取这个服务的句柄，该名称能直接用于和其他服务间进行通信）
 /// @param handle 服务上下文的句柄
 /// @param name 
 /// @return 

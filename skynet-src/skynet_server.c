@@ -67,7 +67,7 @@ struct skynet_node {
 	ATOM_INT total;
 	int init;
 	uint32_t monitor_exit;
-	pthread_key_t handle_key;	// 线程特定数据
+	pthread_key_t handle_key;	// 线程本地数据的key
 	bool profile;	// default is on
 };
 
@@ -88,6 +88,7 @@ context_dec() {
 	ATOM_FDEC(&G_NODE.total);
 }
 
+/// @brief 获取当前线程的线程属性（如果当前线程没有设置线程属性，默认主线程）
 uint32_t 
 skynet_current_handle(void) {
 	if (G_NODE.init) {
@@ -310,18 +311,24 @@ skynet_context_dispatchall(struct skynet_context * ctx) {
 	}
 }
 
+/// @brief 调度并处理消息
+/// @param sm 处理消息的worker线程的监控器
+/// @param q  指定要处理的服务消息队列，不指定则从全局队列中取一个
+/// @param weight 本次调度要处理的消息数量 (-1:1条; 0:全部; 1:1/2; 2:1/4 .....)
+/// @return 下一个待处理的消息队列，没有返回 NULL
 struct message_queue * 
 skynet_context_message_dispatch(struct skynet_monitor *sm, struct message_queue *q, int weight) {
 	if (q == NULL) {
-		q = skynet_globalmq_pop();		// 从全局消息队列取
+		q = skynet_globalmq_pop();			// 从全局队列中取一个服务的私有消息队列
 		if (q==NULL)
 			return NULL;
 	}
 
-	uint32_t handle = skynet_mq_handle(q);	// actor 的句柄
+	uint32_t handle = skynet_mq_handle(q);						// 通过服务消息队列得到服务handle
 
-	struct skynet_context * ctx = skynet_handle_grab(handle);	// 查找actor
+	struct skynet_context * ctx = skynet_handle_grab(handle);	// 通过服务handle得到对应的服务
 	if (ctx == NULL) {
+		// 到这里，说明这消息队列被废弃了，删除该消息队列
 		struct drop_t d = { handle };
 		skynet_mq_release(q, drop_message, &d);
 		return skynet_globalmq_pop();
@@ -331,42 +338,41 @@ skynet_context_message_dispatch(struct skynet_monitor *sm, struct message_queue 
 	struct skynet_message msg;
 
 	for (i=0;i<n;i++) {
-		// 从actor专属消息队列取消息
+		// 从服务的消息队列中取消息
 		if (skynet_mq_pop(q,&msg)) {
+			// 拿不到消息，直接返回
 			skynet_context_release(ctx);
 			return skynet_globalmq_pop();
-		/*
-		// 根据权重表取消息，为了打乱线程
-		1、 weight < 0 只取出一个消息进行处理
-		2、 weight == 0 取出全部消息进行处理
-		3、  weight == 1 取出一半消息进行处理
-		4、  weight == 1 取出1/4消息进行处理
-		*/
+
 		} else if (i==0 && weight >= 0) {
-			n = skynet_mq_length(q);
-			n >>= weight;
+			n = skynet_mq_length(q);	// 消息队列总长度
+			n >>= weight;				// 按线程工作权重决定本次要处理的消息数量
 		}
 		int overload = skynet_mq_overload(q);
 		if (overload) {
 			skynet_error(ctx, "May overload, message queue length = %d", overload);
 		}
 
+		// 更新 skynet_monitor 的记录和计数
 		skynet_monitor_trigger(sm, msg.source , handle);
 
 		if (ctx->cb == NULL) {
-			skynet_free(msg.data);
+			skynet_free(msg.data);			// 没有回调处理函数，销毁消息
 		} else {
-			dispatch_message(ctx, &msg);
+			dispatch_message(ctx, &msg);	// 调用回调处理函数，处理消息
 		}
 
+		// 更新 skynet_monitor 的记录和计数
 		skynet_monitor_trigger(sm, 0,0);
 	}
 
 	assert(q == ctx->queue);
+	// 本轮消息处理完毕，尝试从全局队列中获取一个新的服务队列，如果能拿到，则不管当前处理的队列中还有没有剩余消息，都会把本次处理的队列 push 到全局队列的末尾，\
+	 如果拿不到新的队列，则返回本次处理的队列，下次继续处理，即使本次处理的队列中已经没有消息了，会在下一次处理时取不到消息直接返回
 	struct message_queue *nq = skynet_globalmq_pop();
 	if (nq) {
 		// If global mq is not empty , push q back, and return next queue (nq)
-		// Else (global mq is empty or block, don't push q back, and return q again (for next dispatch)
+        // Else (global mq is empty or block, don't push q back, and return q again (for next dispatch)
 		skynet_globalmq_push(q);
 		q = nq;
 	} 
@@ -721,9 +727,19 @@ _filter_args(struct skynet_context * context, int type, int *session, void ** da
 	*sz |= (size_t)type << MESSAGE_TYPE_SHIFT;
 }
 
+/// @brief 发送消息函数（不管是从 Lua 层还是 C 层发送消息，最终调用的接口都是这个）
+/// @param context harbor服务（跨节点发送消息，需要使用到）
+/// @param source 源服务的handle
+/// @param destination 目的服务的handle
+/// @param type 消息类型
+/// @param session 
+/// @param data 消息数据
+/// @param sz 	数据长度
+/// @return 返回本次发送的 session id
 int
 skynet_send(struct skynet_context * context, uint32_t source, uint32_t destination , int type, int session, void * data, size_t sz) {
 	if ((sz & MESSAGE_TYPE_MASK) != sz) {
+		// 消息类型超长
 		skynet_error(context, "The message to %x is too large", destination);
 		if (type & PTYPE_TAG_DONTCOPY) {
 			skynet_free(data);
@@ -753,6 +769,7 @@ skynet_send(struct skynet_context * context, uint32_t source, uint32_t destinati
 		rmsg->type = sz >> MESSAGE_TYPE_SHIFT;
 		skynet_harbor_send(rmsg, source, session);
 	} else {
+		// 和目的服务在同一节点内，直接打包生成消息，push到目的服务的消息队列中
 		struct skynet_message smsg;
 		smsg.source = source;
 		smsg.session = session;
@@ -857,7 +874,7 @@ skynet_globalexit(void) {
 void
 skynet_initthread(int m) {
 	uintptr_t v = (uint32_t)(-m);
-	pthread_setspecific(G_NODE.handle_key, (void *)v);
+	pthread_setspecific(G_NODE.handle_key, (void *)v);	// 设置线程本地数据的 value
 }
 
 void

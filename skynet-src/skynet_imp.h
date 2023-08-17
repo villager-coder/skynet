@@ -16,11 +16,11 @@ struct skynet_config {
 };
 
 
-#define THREAD_WORKER 0
-#define THREAD_MAIN 1
-#define THREAD_SOCKET 2
-#define THREAD_TIMER 3
-#define THREAD_MONITOR 4
+#define THREAD_WORKER 0		// worker 线程
+#define THREAD_MAIN 1		// main 线程
+#define THREAD_SOCKET 2		// socket 线程
+#define THREAD_TIMER 3		// timer 线程
+#define THREAD_MONITOR 4	// monitor 线程
 
 void skynet_start(struct skynet_config * config);
 

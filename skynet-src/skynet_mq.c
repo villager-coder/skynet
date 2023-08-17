@@ -9,7 +9,7 @@
 #include <assert.h>
 #include <stdbool.h>
 
-#define DEFAULT_QUEUE_SIZE 64
+#define DEFAULT_QUEUE_SIZE 64	// 
 #define MAX_GLOBAL_MQ 0x10000
 
 // 0 means mq is not in global mq.
@@ -18,22 +18,23 @@
 #define MQ_IN_GLOBAL 1
 #define MQ_OVERLOAD 1024
 
-/* 消息队列 */
+/* 服务消息队列（对应 actor 模型中的mailbox） */
 struct message_queue {
 	struct spinlock lock;
-	uint32_t handle;				// 消息队列的 handle
-	int cap;						// 容量
-	int head;						// 消息的头指针
-	int tail;						// 消息的尾指针
+	uint32_t handle;				// 拥有该消息队列的服务的handle
+	int cap;						// 容量（queue数组的大小）
+	int head;						// 消息的头指针（队列中最早的一条消息的索引值）
+	int tail;						// 消息的尾指针（队列中最晚的一条消息的索引值）
 	int release;					// 标记是否已经被释放
-	int in_global;					// 标记是否在全局队列中
+	int in_global;					// 标记是否在全局队列中（当被放到全局队列中时，值为MQ_IN_GLOBAL）
 	int overload;					// 现在的负载
-	int overload_threshold;			// 超载警告的阈值
-	struct skynet_message *queue;	// 消息队列数组
+	int overload_threshold;			// 超载警告的阈值（取消息时检测，如果overload超过该值，会输出一条服务负载过重的警告日志）
+	struct skynet_message *queue;	// 消息队列数组（动态数组，当不足时会自动扩容queue数组，每次扩大2倍）
 	struct message_queue *next;		// 下一个消息队列，链表结构
 };
 
-/* 全局队列，一个链表，一个节点对应一个服务的私有消息队列 */
+/* 全局队列，一个链表，一个节点对应一个服务的私有消息队列
+ 只有当服务的消息队列中有待处理的消息时，才会被加入到全局消息队列中 */
 struct global_queue {
 	struct message_queue *head;
 	struct message_queue *tail;
@@ -57,6 +58,7 @@ skynet_globalmq_push(struct message_queue * queue) {
 	SPIN_UNLOCK(q)
 }
 
+/// @brief 全局队列是一个由服务消息队列组成的链表，这里取链表头的那个服务消息队列
 struct message_queue * 
 skynet_globalmq_pop() {
 	struct global_queue *q = Q;
@@ -165,6 +167,8 @@ skynet_mq_pop(struct message_queue *q, struct skynet_message *message) {
 	}
 
 	if (ret) {
+		// 这个服务队列中，没有可处理的消息，标记置0，不把这个服务队列放回全局队列
+		// 直到这个服务队列中被 push 消息时，会重新把其 in_global 参数设为 MQ_IN_GLOBAL，并把这个服务队列 push 回全局队列中
 		q->in_global = 0;
 	}
 	
@@ -173,6 +177,8 @@ skynet_mq_pop(struct message_queue *q, struct skynet_message *message) {
 	return ret;
 }
 
+/// @brief 扩容消息队列
+/// @param q 
 static void
 expand_queue(struct message_queue *q) {
 	struct skynet_message *new_queue = skynet_malloc(sizeof(struct skynet_message) * q->cap * 2);

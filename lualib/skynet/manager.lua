@@ -56,6 +56,9 @@ function skynet.register(name)
 	end
 end
 
+---comment 注册服务名字，最终是调用 C 层的skynet_handle_namehandle接口完成注册
+---@param name string
+---@param handle integer
 function skynet.name(name, handle)
 	if not globalname(name, handle) then
 		c.command("NAME", name .. " " .. skynet.address(handle))

@@ -487,7 +487,12 @@ function skynet.localname(name)
 	return c.addresscommand("QUERY", name)
 end
 
+-- 获取skynet进程启动到现在的相对时间（近似值），是 skynet timer 线程维护和更新的一个时间，精度为 2.5ms
+-- 由于是skynet 自己维护的一个近似时间，精度较低，但获取消耗小
 skynet.now = c.now
+
+-- 获取skynet进程启动到现在的相对时间（准确值），通过 clock_gettime 获得，精度为 1ns
+-- 精度高，但获取消耗大
 skynet.hpc = c.hpc	-- high performance counter
 
 local traceid = 0
@@ -512,8 +517,9 @@ function skynet.tracetag()
 	return session_coroutine_tracetag[running_thread]
 end
 
-local starttime
+local starttime		-- skynet 进程启动时间
 
+-- 获取 skynet 进程启动时间
 function skynet.starttime()
 	if not starttime then
 		starttime = c.intcommand("STARTTIME")
@@ -521,6 +527,7 @@ function skynet.starttime()
 	return starttime
 end
 
+-- 当前的绝对时间，由于使用的是 skynet.now() 所以这也是个精度较低的绝对时间近似值
 function skynet.time()
 	return skynet.now()/100 + (starttime or skynet.starttime())
 end
@@ -869,7 +876,7 @@ end
 
 ---comment 创建普通服务
 ---@param name string 服务名（服务的lua脚本名，如"main" -> main.lua）
----@return unknown 
+---@return integer handle C 层 skynet_handle_register 方法给服务分配的handle值
 function skynet.newservice(name, ...)
 	-- 通过 skynet.call (异步变同步)，向 laucher 服务（源码是laucher.lua）发送一个 LAUNCH 消息，阻塞等待创建结果
 	return skynet.call(".launcher", "lua" , "LAUNCH", "snlua", name, ...)
