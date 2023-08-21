@@ -21,22 +21,22 @@
 
 // #define DEBUG_LOG
 
-#define MEMORY_WARNING_REPORT (1024 * 1024 * 32)
+#define MEMORY_WARNING_REPORT (1024 * 1024 * 32)		// 32 MBytes
 
 // 1.写lua代码
 // 2.lua虚拟机词法分析、生成指令集 .byte
 // 3.lua虚拟机执行指令集
 
-// actor
+/* snlua 是一切 lua 服务的原型，也是 99% 情况下业务中使用的服务 */
 struct snlua {
-	lua_State * L;	// lua 虚拟机（沙盒环境）
+	lua_State * L;					// lua 状态机（lua 虚拟机、沙盒环境）
 	struct skynet_context * ctx;
-	size_t mem;
-	size_t mem_report;
-	size_t mem_limit;
-	lua_State * activeL;
-	ATOM_INT trap;
-}; // lua actor 隔离环境
+	size_t mem;						// 已使用的内存大小		（字节）
+	size_t mem_report;				// 触发警告的内存阀值 （每次触发阀值警告后，这个值会扩大2倍）
+	size_t mem_limit;				// 内存使用上限
+	lua_State * activeL;			// 目前正在运行的状态机（lua 协程）
+	ATOM_INT trap;					// 打断状态（可以接受外部信号打断其运行状态）
+}; // lua Actor 隔离环境
 
 // LUA_CACHELIB may defined in patched lua for shared proto
 #ifdef LUA_CACHELIB
@@ -68,13 +68,13 @@ codecache(lua_State *L) {
 static void
 signal_hook(lua_State *L, lua_Debug *ar) {
 	void *ud = NULL;
-	lua_getallocf(L, &ud);
+	lua_getallocf(L, &ud);			// 拿到创建 lua_State 的时候存进去的 snlua 结构体的指针
 	struct snlua *l = (struct snlua *)ud;
 
-	lua_sethook (L, NULL, 0, 0);
+	lua_sethook (L, NULL, 0, 0);	// 移除钩子函数
 	if (ATOM_LOAD(&l->trap)) {
-		ATOM_STORE(&l->trap , 0);
-		luaL_error(L, "signal 0");
+		ATOM_STORE(&l->trap , 0);	// 设置为可打断状态
+		luaL_error(L, "signal 0");	// 通过报错打断当前执行逻辑
 	}
 }
 
@@ -333,17 +333,21 @@ lstop(lua_State *L) {
 static int
 init_profile(lua_State *L) {
 	luaL_Reg l[] = {
-		{ "start", lstart },
+		{ "start", lstart },	// start 和 stop 配合使用，可以获得时间间隔
 		{ "stop", lstop },
 		{ "resume", luaB_coresume },
 		{ "wrap", luaB_cowrap },
 		{ NULL, NULL },
 	};
+
+	// 通过 l 构建一个新的lua表，并返回其在lua栈中的索引
 	luaL_newlibtable(L,l);
+	
+	// 创建3个空lua 表
 	lua_newtable(L);	// table thread->start time
 	lua_newtable(L);	// table thread->total time
-
 	lua_newtable(L);	// weak table
+
 	lua_pushliteral(L, "kv");
 	lua_setfield(L, -2, "__mode");
 
@@ -351,6 +355,7 @@ init_profile(lua_State *L) {
 	lua_setmetatable(L, -3);
 	lua_setmetatable(L, -3);
 
+	// 遍历 l 将这些函数注册到lua全局环境，将当前栈顶的 2 个值作为 upvalue 注册到新创建的闭包中
 	luaL_setfuncs(L,l,2);
 
 	return 1;
@@ -384,16 +389,31 @@ optstring(struct skynet_context *ctx, const char *key, const char * str) {
 	return ret;
 }
 
+/// @brief 对 snlua 实例真正进行初始化的函数
+/// @param l 
+/// @param ctx 
+/// @param args 
+/// @param sz 
+/// @return 
 static int
 init_cb(struct snlua *l, struct skynet_context *ctx, const char * args, size_t sz) {
 	lua_State *L = l->L;
 	l->ctx = ctx;
-	lua_gc(L, LUA_GCSTOP, 0);
-	lua_pushboolean(L, 1);  /* signal for libraries to ignore env. vars. */
-	lua_setfield(L, LUA_REGISTRYINDEX, "LUA_NOENV");
+	lua_gc(L, LUA_GCSTOP, 0);		// 停止垃圾回收器
+
+	// 将 lua 状态机的注册表中的 LUA_NOENV 变量 设置为 true （通过将LUA_NOENV设置为true，限制lua代码的访问范围，增加安全性）
+	// 当LUA_NOENV = true时，lua的环境变量将不会被加载，即在执行lua代码时，无法通过环境变量访问到外部的全局变量、函数等。
+	lua_pushboolean(L, 1);  						 // 向lua栈中压入一个 true
+	lua_setfield(L, LUA_REGISTRYINDEX, "LUA_NOENV"); // pop 出栈顶的值设置指定位置的 LUA_NOENV 变量（LUA_REGISTRYINDEX 是指向lua注册表的特殊索引）
+
+	// lua 状态机中加载 lua 标准库（基本数学库、表管理库、字符串处理库等）
 	luaL_openlibs(L);
+
+	// 加载一个 C 库并将其注册为一个名为 "skynet.profile" 的 lua 模块
+	// 调用成功后，栈顶元素会有一个 table，即该模块的命名空间。这个 table 中包含了从 C 库导出的所有函数和全局变量。
 	luaL_requiref(L, "skynet.profile", init_profile, 0);
 
+	// 使用加载的 skynet.profile 库中的 resume 和 wrap 替换掉标准库协程中的同名函数
 	int profile_lib = lua_gettop(L);
 	// replace coroutine.resume / coroutine.wrap
 	lua_getglobal(L, "coroutine");
@@ -402,15 +422,21 @@ init_cb(struct snlua *l, struct skynet_context *ctx, const char * args, size_t s
 	lua_getfield(L, profile_lib, "wrap");
 	lua_setfield(L, -2, "wrap");
 
+	// 移除栈顶table（模块注册信息是保存在全局环境中，这里pop掉，注册的模块仍然生效）
 	lua_settop(L, profile_lib-1);
 
-	lua_pushlightuserdata(L, ctx);
+	// 在 lua 状态机的注册表中新增 skynet_context 变量，其值为C层服务上下文的指针
+	lua_pushlightuserdata(L, ctx);		// 压入轻量级用户数据，服务上下文指针
 	lua_setfield(L, LUA_REGISTRYINDEX, "skynet_context");
+
+	// 加载一个 C 库并将其注册为一个名为 "skynet.codecache" 的 lua 模块
 	luaL_requiref(L, "skynet.codecache", codecache , 0);
 	lua_pop(L,1);
 
+	// 启动 Lua 的垃圾回收器执行一次增量式垃圾回收，并显式地触发老生代的垃圾回收（参数 `0` 表示对所有对象进行垃圾回收）
 	lua_gc(L, LUA_GCGEN, 0, 0);
 
+	// 设置相关配置的全局变量
 	const char *path = optstring(ctx, "lua_path","./lualib/?.lua;./lualib/?/init.lua");
 	lua_pushstring(L, path);
 	lua_setglobal(L, "LUA_PATH");
@@ -427,17 +453,16 @@ init_cb(struct snlua *l, struct skynet_context *ctx, const char * args, size_t s
 	lua_pushcfunction(L, traceback);
 	assert(lua_gettop(L) == 1);
 
-	// 加载并执行 lualib\loader.lua
-	// loader 的作用是去各项代码目录查找指定的lua文件，找到后 loadfile 并执行(等效于 dofile)。
+	// 加载 loader.lua 的代码，将其编译成 Lua 函数（loader 的作用是去各项代码目录查找指定的lua文件，找到后 loadfile 并执行(等效于 dofile)）
 	const char * loader = optstring(ctx, "lualoader", "./lualib/loader.lua");
-
 	int r = luaL_loadfile(L,loader);
 	if (r != LUA_OK) {
 		skynet_error(ctx, "Can't load %s : %s", loader, lua_tostring(L, -1));
 		report_launcher_error(ctx);
 		return 1;
 	}
-	// args 即要查找并执行的lua文件名，如 "bootstrap"
+
+	// 通过 loader 加载指定的服务文件（args 即要查找并执行的lua文件名，如 "bootstrap"）
 	lua_pushlstring(L, args, sz);
 	r = lua_pcall(L,1,0,1);
 	if (r != LUA_OK) {
@@ -446,6 +471,8 @@ init_cb(struct snlua *l, struct skynet_context *ctx, const char * args, size_t s
 		return 1;
 	}
 	lua_settop(L,0);
+
+	// 检查注册表中是否有 lua 服务的内存上限变量，如果有则需要设置
 	if (lua_getfield(L, LUA_REGISTRYINDEX, "memlimit") == LUA_TNUMBER) {
 		size_t limit = lua_tointeger(L, -1);
 		l->mem_limit = limit;
@@ -455,7 +482,7 @@ init_cb(struct snlua *l, struct skynet_context *ctx, const char * args, size_t s
 	}
 	lua_pop(L, 1);
 
-	lua_gc(L, LUA_GCRESTART, 0);
+	lua_gc(L, LUA_GCRESTART, 0);	// 重新启动垃圾回收器
 
 	return 0;
 }
@@ -466,7 +493,7 @@ launch_cb(struct skynet_context * context, void *ud, int type, int session, uint
 	struct snlua *l = ud;
 	// 将服务原本绑定的句柄和回调函数清空（即注销C语言层面的回调函数，使它不再接收消息）
 	skynet_callback(context, NULL, NULL);
-	// 注册lua语言层的回调函数，把消息通过lua接口来接收，控制权就开始转到lua层
+	// 调用真正的初始化函数，控制权开始转到lua层
 	int err = init_cb(l, context, msg, sz);
 	if (err) {
 		skynet_command(context, "EXIT", NULL);
@@ -475,7 +502,7 @@ launch_cb(struct skynet_context * context, void *ud, int type, int session, uint
 	return 0;
 }
 
-/// @brief 初始化
+/// @brief 初始化 snlua 实例。不直接直接在这里做初始化，只是给自己发了一条消息，然后在消息的回调函数 launch_cb 里通过调用 init_cb 做实际的初始化工作
 /// @param l 	snlua 沙盒环境
 /// @param ctx 	要在该沙盒中运行的 lua 服务上下文
 /// @param args 服务运行参数，如："bootstrap "
@@ -494,6 +521,12 @@ snlua_init(struct snlua *l, struct skynet_context *ctx, const char * args) {
 	return 0;
 }
 
+/// @brief 自定义的内存分配函数（主要负责处理 snlua 实例中跟内存有关的三个变量 mem / mem_limit / mem_report）
+/// @param ud snlua 实例指针
+/// @param ptr 
+/// @param osize 
+/// @param nsize 
+/// @return 
 static void *
 lalloc(void * ud, void *ptr, size_t osize, size_t nsize) {
 	struct snlua *l = ud;
@@ -514,14 +547,14 @@ lalloc(void * ud, void *ptr, size_t osize, size_t nsize) {
 	return skynet_lalloc(ptr, osize, nsize);
 }
 
-/// @brief snlua 模块的实例化方法
+/// @brief 创建 snlua 实例
 struct snlua *
 snlua_create(void) {
 	struct snlua * l = skynet_malloc(sizeof(*l));
 	memset(l,0,sizeof(*l));
 	l->mem_report = MEMORY_WARNING_REPORT;
 	l->mem_limit = 0;
-	l->L = lua_newstate(lalloc, l);	// 创建虚拟机，生成沙盒环境
+	l->L = lua_newstate(lalloc, l);	// 创建lua虚拟机，生成沙盒环境（使用自定义的内存分配方法）
 	l->activeL = NULL;
 	ATOM_INIT(&l->trap , 0);
 	return l;
@@ -533,6 +566,9 @@ snlua_release(struct snlua *l) {
 	skynet_free(l);
 }
 
+/// @brief 信号中断，打断正在运行的脚本（这个功能主要是用来打断可能陷入死循环的服务）
+/// @param l 
+/// @param signal 
 void
 snlua_signal(struct snlua *l, int signal) {
 	skynet_error(l->ctx, "recv a signal %d", signal);
@@ -541,6 +577,8 @@ snlua_signal(struct snlua *l, int signal) {
 			// only one thread can set trap ( l->trap 0->1 )
 			if (!ATOM_CAS(&l->trap, 0, 1))
 				return;
+
+			// 设置钩子函数，每执行1条指令后调用钩子函数
 			lua_sethook (l->activeL, signal_hook, LUA_MASKCOUNT, 1);
 			// finish set ( l->trap 1 -> -1 )
 			ATOM_CAS(&l->trap, 1, -1);

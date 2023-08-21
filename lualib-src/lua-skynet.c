@@ -492,6 +492,9 @@ ltrace(lua_State *L) {
 	return 0;
 }
 
+/// @brief skynet.core
+/// @param L 
+/// @return 
 LUAMOD_API int
 luaopen_skynet_core(lua_State *L) {
 	luaL_checkversion(L);

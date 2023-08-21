@@ -12,7 +12,7 @@
 
 #define MAX_MODULE_TYPE 32		// 最大只支持注册32个module
 
-/* 全局的 module 管理器 */
+/* 全局的 modules 管理器 */
 struct modules {
 	int count;				// 已加载的module总数量
 	struct spinlock lock;

@@ -47,6 +47,7 @@ skynet_handle_register(struct skynet_context *ctx) {
 		uint32_t handle = s->handle_index;
 
 		// 由于服务退出后，slot中数据回收但handle值不会回收，导致slot空洞问题，因此使用循环遍历找一个空位置放服务数据
+		// 不回收handle，使handle尽可能长时间的保留，以避免当消息发向一个正准备退出的服务后，新启动的服务顶替该地址，而导致消息发向了错误的实体。
 		for (i=0;i<s->slot_size;i++,handle++) {
 			if (handle > HANDLE_MASK) {
 				// 0 is reserved	// 当 handle 超过 16777215 以后，handle 会从 1 再次开始

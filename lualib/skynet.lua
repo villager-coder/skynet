@@ -31,7 +31,7 @@ local proto = {}
 local skynet = {
 	-- read skynet.h
 	PTYPE_TEXT = 0,
-	PTYPE_RESPONSE = 1,
+	PTYPE_RESPONSE = 1,	-- skynet.call 调用的回复消息
 	PTYPE_MULTICAST = 2,
 	PTYPE_CLIENT = 3,
 	PTYPE_SYSTEM = 4,
@@ -589,9 +589,9 @@ skynet.redirect = function(dest,source,typename,...)
 	return c.redirect(dest, source, proto[typename].id, ...)
 end
 
-skynet.pack = assert(c.pack)
+skynet.pack = assert(c.pack)				-- 数据打包，lua table -> 二进制数据
 skynet.packstring = assert(c.packstring)
-skynet.unpack = assert(c.unpack)
+skynet.unpack = assert(c.unpack)			-- 数据解包，二进制数据 -> lua table
 skynet.tostring = assert(c.tostring)
 skynet.trash = assert(c.trash)
 

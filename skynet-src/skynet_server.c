@@ -39,28 +39,33 @@
 
 #endif
 
-/* skynet 服务上下文（C Actor 隔离环境），用于管理一个服务的生命周期和消息处理等操作 */
+/* skynet 服务上下文，用于管理一个服务的生命周期和消息处理等操作 */
 struct skynet_context {
-	void * instance;				// module数据实例
-	struct skynet_module * mod;		// 通过哪个 skynet_module 创建的
-	void * cb_ud;					// callback userdata
-	skynet_cb cb;					// 回调函数
+	void * instance;				// module数据实例，由指定module的xxx_create函数创建的数据实例指针，同一类module可能有多个实例，
+                                    // 因此每个服务都应该有自己的数据
+	struct skynet_module * mod;		// 对应的那个 module，方便后面对xxx_init、xxx_signal、xxx_release函数进行调用
+	void * cb_ud;					// 调用callback函数时，回传给callback的userdata，一般是instance指针
+	skynet_cb cb;					// 服务的消息回调函数，一般在 module 的 xxx_init 函数里指定
 	struct message_queue *queue;	// 服务私有的消息队列
-	ATOM_POINTER logfile;			// 文件指针是个原子指针
+	ATOM_POINTER logfile;			// 日志句柄（文件指针并且是原子指针）
 	uint64_t cpu_cost;				// in microsec	// 消耗的总 cpu 时间
 	uint64_t cpu_start;				// in microsec	// 本次消息处理的起始时间点
-	char result[32];				// 用来保存处理结果
-	uint32_t handle;				// 服务句柄; 用来完成  服务名字 → handle 和 handle → 服务 的映射
-	int session_id;					// 消息的 session id 分配器，不断累加
-	ATOM_INT ref;					// 引用计数（当计数为0时将会删除服务）
+	char result[32];				// 用来保存处理结果（操作 skynet_context 的返回值，会写到这里）
+	uint32_t handle;				// 服务句柄（唯一标识服务的id）; 用来完成  服务名字 → handle 和 handle → 服务 的映射
+	int session_id;					// 会话id，（发出请求后，接收方如果需要发送返回消息时，通过session_id来匹配一个返回，对应哪个请求）
+	ATOM_INT ref;					// 引用计数（当计数为0时将表示内存可以被释放）
 	int message_count;				// 处理过的消息总数
 	bool init;						// 初始化完成标记
 	bool endless;					// 死循环标志
 	bool profile;					// 是否开启了 profile
 
 	CHECKCALLING_DECL
-};
-// worker 线程会不断为消息队列 queue 中每个消息调用回调函数 cb 进行处理。
+}; // C Actor 隔离环境
+
+/* 创建一个新服务的过程
+ 通过全局的模块管理器(struct modules)，获得对应服务类型的模块(struct skynet_module) ，通过模块创建一份对应类型的数据实例(void*)并完成初始化后，
+ 创建服务上下文(struct skynet_context)，随后将数据实例、该服务类型的模块和这个服务上下文关联，最后将服务上下文添加到全局的服务管理器(handle_storage)中。
+*/
 
 
 struct skynet_node {
@@ -732,7 +737,7 @@ _filter_args(struct skynet_context * context, int type, int *session, void ** da
 /// @param source 源服务的handle
 /// @param destination 目的服务的handle
 /// @param type 消息类型
-/// @param session 
+/// @param session 会话id（一个请求不需要回应（单向推送），就置 session 为 0，即skynet.call() 会设置session，skynet.send() 会设置0）
 /// @param data 消息数据
 /// @param sz 	数据长度
 /// @return 返回本次发送的 session id
