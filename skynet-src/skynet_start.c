@@ -22,7 +22,7 @@
 struct monitor {
 	int count;						// skynet的worker线程总量
 	struct skynet_monitor ** m;		// 次级监控器列表，一个监控器监控一个worker线程
-	pthread_cond_t cond;			// 给 worker 线程挂起用的全局条件
+	pthread_cond_t cond;			// 唤醒 worker 线程用的全局条件
 	pthread_mutex_t mutex;
 	int sleep;						// 睡眠中的线程数数量
 	int quit;						// 退出标记
@@ -74,9 +74,9 @@ thread_socket(void *p) {
 			break;
 		if (r<0) {
 			CHECK_ABORT
-			continue;
+			continue;	// 一般是还有消息没处理完，直接继续循环
 		}
-		wakeup(m,0);
+		wakeup(m,0);	// 尝试唤醒一个 worker 线程（只有全部worker线程都处于睡眠状态才回去唤醒，否则不做处理）
 	}
 	return NULL;
 }

@@ -5,14 +5,14 @@
 #include "socket_info.h"
 #include "socket_buffer.h"
 
-#define SOCKET_DATA 0
-#define SOCKET_CLOSE 1
-#define SOCKET_OPEN 2
-#define SOCKET_ACCEPT 3
-#define SOCKET_ERR 4
-#define SOCKET_EXIT 5
-#define SOCKET_UDP 6
-#define SOCKET_WARNING 7
+#define SOCKET_DATA 0		// 读取数据
+#define SOCKET_CLOSE 1		// socket 关闭
+#define SOCKET_OPEN 2		// socket 连接成功
+#define SOCKET_ACCEPT 3		// accept 成功
+#define SOCKET_ERR 4		// socket 错误
+#define SOCKET_EXIT 5		// 退出 socket 线程
+#define SOCKET_UDP 6		// 接收 udp 数据
+#define SOCKET_WARNING 7	// socket 警告
 
 // Only for internal use
 #define SOCKET_RST 8
@@ -22,7 +22,7 @@ struct socket_server;
 
 struct socket_message {
 	int id;
-	uintptr_t opaque;
+	uintptr_t opaque;		// 目标服务的handle（对应 socket 对象中所绑定的那个服务handle）
 	int ud;	// for accept, ud is new connection id ; for data, ud is size of data 
 	char * data;
 };

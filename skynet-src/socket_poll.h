@@ -6,11 +6,11 @@
 typedef int poll_fd;
 
 struct event {
-	void * s;
-	bool read;
-	bool write;
+	void * s;		// 触发事件的 socket 对象指针
+	bool read;		// 是否触发可读事件
+	bool write;		// 是否触发可写事件
 	bool error;
-	bool eof;
+	bool eof;		// 文件描述符被挂断或者对端已经关闭连接
 };
 
 static bool sp_invalid(poll_fd fd);

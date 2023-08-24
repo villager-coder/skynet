@@ -7,7 +7,7 @@
 struct skynet_context;
 
 #define SKYNET_SOCKET_TYPE_DATA 1
-#define SKYNET_SOCKET_TYPE_CONNECT 2
+#define SKYNET_SOCKET_TYPE_CONNECT 2		// 连接建立成功，通知发起这个连接的源服务器
 #define SKYNET_SOCKET_TYPE_CLOSE 3
 #define SKYNET_SOCKET_TYPE_ACCEPT 4
 #define SKYNET_SOCKET_TYPE_ERROR 5

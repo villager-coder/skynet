@@ -22,12 +22,14 @@
 #define MAX_SOCKET_P 16
 #define MAX_EVENT 64
 #define MIN_READ_BUFFER 64
-#define SOCKET_TYPE_INVALID 0
+
+/* socket 连接状态 */
+#define SOCKET_TYPE_INVALID 0				// 无效的连接
 #define SOCKET_TYPE_RESERVE 1
-#define SOCKET_TYPE_PLISTEN 2
-#define SOCKET_TYPE_LISTEN 3
-#define SOCKET_TYPE_CONNECTING 4
-#define SOCKET_TYPE_CONNECTED 5
+#define SOCKET_TYPE_PLISTEN 2				// 监听未完成状态					-> SOCKET_TYPE_LISTEN
+#define SOCKET_TYPE_LISTEN 3				// 监听完成状态
+#define SOCKET_TYPE_CONNECTING 4			// 正在尝试建立连接					-> SOCKET_TYPE_CONNECTED
+#define SOCKET_TYPE_CONNECTED 5				// ESTABLISHED状态
 #define SOCKET_TYPE_HALFCLOSE_READ 6
 #define SOCKET_TYPE_HALFCLOSE_WRITE 7
 #define SOCKET_TYPE_PACCEPT 8
@@ -86,55 +88,57 @@ struct socket_stat {
 	uint64_t write;
 };
 
+/* socket 结构，用于标识一条链接 */
 struct socket {
-	uintptr_t opaque;
-	struct wb_list high;
-	struct wb_list low;
-	int64_t wb_size;
-	struct socket_stat stat;
-	ATOM_ULONG sending;
-	int fd;
-	int id;
-	ATOM_INT type;
-	uint8_t protocol;
-	bool reading;
-	bool writing;
-	bool closing;
-	ATOM_INT udpconnecting;
-	int64_t warn_size;
-	union {
-		int size;
-		uint8_t udp_address[UDP_ADDRESS_SIZE];
+	uintptr_t opaque;				// 关联的 服务handle（当连接上有网络消息时，socket 线程会将消息交给该服务去处理）
+	struct wb_list high;			// 高优先级队列
+	struct wb_list low;				// 低优先级队列
+	int64_t wb_size;				// 等待写入的字节长度
+	struct socket_stat stat;		// 连接状态数据
+	ATOM_ULONG sending;				// 是否正在发送数据，是一个引用计数，会累加
+	int fd;							// 套接字
+	int id;							// 分配的 id（对应 socket_server.slot 中的索引）
+	ATOM_INT type;					// 当前连接状态
+	uint8_t protocol;				// 连接协议
+	bool reading;					// fd 的 read 监听标记
+	bool writing;					// fd 的 write 监听标记
+	bool closing;					// fd 的 close 标记
+	ATOM_INT udpconnecting;			// udp 正在连接
+	int64_t warn_size;				// 报警阈值
+	union {	
+		int size;					// 如果是 tcp 连接，用 size 表示每次读取的字节数
+		uint8_t udp_address[UDP_ADDRESS_SIZE];	// udp 用 udp_address 表示地址
 	} p;
-	struct spinlock dw_lock;
-	int dw_offset;
-	const void * dw_buffer;
-	size_t dw_size;
+	struct spinlock dw_lock;		// 自旋锁
+	int dw_offset;					// 已经写入的大小
+	const void * dw_buffer;			// dw 待发送的数据缓存，优先级很高
+	size_t dw_size;					// dw 写出的总大小
 };
 
+/* 全局唯一的 socket 管理器 */
 struct socket_server {
-	volatile uint64_t time;
-	int reserve_fd;	// for EMFILE
-	int recvctrl_fd;
-	int sendctrl_fd;
-	int checkctrl;
-	poll_fd event_fd;
-	ATOM_INT alloc_id;
-	int event_n;
-	int event_index;
-	struct socket_object_interface soi;
-	struct event ev[MAX_EVENT];
-	struct socket slot[MAX_SOCKET];
-	char buffer[MAX_INFO];
-	uint8_t udpbuffer[MAX_UDP_PACKAGE];
-	fd_set rfds;
+	volatile uint64_t time;					// 时间，由 timer 线程更新
+	int reserve_fd;							// for EMFILE
+	int recvctrl_fd;						// 接收命令的管道套接字
+	int sendctrl_fd;						// 发送命令的管道套接字
+	int checkctrl;							// 用来标记是否要检查控制台命令的标志			
+	poll_fd event_fd;						// Linux下为 epoll 套接字，MacOS下 kqueue 句柄
+	ATOM_INT alloc_id;						// 已分配的id，不断累加
+	int event_n;							// 本次调用 poll 方法得到的就绪的 fd 个数
+	int event_index;						// 目前已经处理的就绪 fd 索引（当 event_index == event_n 时即一轮轮询处理结束） 
+	struct socket_object_interface soi;		// userobject 接口
+	struct event ev[MAX_EVENT];				// 事件轮询返回的当前触发的事件数组
+	struct socket slot[MAX_SOCKET];			// 全部的 socket 对象（固定容量对象池，即单 skynet 进程支持的连接上限是 65535）
+	char buffer[MAX_INFO];					// 临时缓冲区
+	uint8_t udpbuffer[MAX_UDP_PACKAGE];		// udp 数据缓冲区
+	fd_set rfds;							// 使用 select 监听的描述符集合
 };
 
 struct request_open {
-	int id;
-	int port;
-	uintptr_t opaque;
-	char host[1];
+	int id;				// socket 结构的唯一 id
+	int port;			// 目标端口
+	uintptr_t opaque;	// 发起这个请求的服务的handle
+	char host[1];		// 目标主机
 };
 
 struct request_send {
@@ -161,7 +165,7 @@ struct request_close {
 
 struct request_listen {
 	int id;
-	int fd;
+	int fd;		// 监听套接字fd
 	uintptr_t opaque;
 	char host[1];
 };
@@ -207,23 +211,23 @@ struct request_udp {
 	C set udp address
 	Q query info
  */
-
+// 命令请求包的结构
 struct request_package {
-	uint8_t header[8];	// 6 bytes dummy
+	uint8_t header[8];	// 6 bytes dummy, 第 7 个字节表示命令类型，第 8 个字节表示数据长度
 	union {
 		char buffer[256];
-		struct request_open open;
+		struct request_open open;					// O
 		struct request_send send;
 		struct request_send_udp send_udp;
 		struct request_close close;
-		struct request_listen listen;
+		struct request_listen listen;				// L
 		struct request_bind bind;
 		struct request_resumepause resumepause;
 		struct request_setopt setopt;
 		struct request_udp udp;
 		struct request_setudp set_udp;
 	} u;
-	uint8_t dummy[256];
+	uint8_t dummy[256];		// 预留 256 字节
 };
 
 union sockaddr_all {
@@ -379,18 +383,27 @@ clear_wb_list(struct wb_list *list) {
 
 struct socket_server * 
 socket_server_create(uint64_t time) {
-	int i;
-	int fd[2];
+	// 创建epoll套接字（Linux环境）（skynet 使用 LT epoll）
 	poll_fd efd = sp_create();
 	if (sp_invalid(efd)) {
 		skynet_error(NULL, "socket-server: create event pool failed.");
 		return NULL;
 	}
+
+	// 创建命令接收管道套接字（这里未设置非阻塞）
+	int fd[2];
 	if (pipe(fd)) {
 		sp_release(efd);
 		skynet_error(NULL, "socket-server: create socket pair failed.");
 		return NULL;
 	}
+	/* 当线程阻塞在 epoll_wait 上时，如果需要修改 epoll 的监听事件列表，一般有三种方法：
+	1、调用 epoll_wait 时设置超时时间，让线程每过一段时间从 epoll_wait 中解放出来，进行需要的操作，然后再次 epoll_wait 陷入阻塞中。
+	2、跨线程直接调用 epoll_ctl 对监听的事件集进行修改，因为 epoll 的监听事件集是线程安全的，可以一个线程阻塞在 epoll_wait 上，另一个线程修改事件集。
+	3、将一个专门用于接收事件修改命令的套接字加入到 epoll 的监听中，当需要进行操作时，向套接字中写入命令，接收端会变得可读，线程将会从 epoll_wait 中被唤醒。
+	*/
+
+	// 使用epoll管理管道读端（Linux环境）
 	if (sp_add(efd, fd[0], NULL)) {
 		// add recvctrl_fd to event poll
 		skynet_error(NULL, "socket-server: can't add server fd to event pool.");
@@ -408,7 +421,8 @@ socket_server_create(uint64_t time) {
 	ss->checkctrl = 1;
 	ss->reserve_fd = dup(1);	// reserve an extra fd for EMFILE
 
-	for (i=0;i<MAX_SOCKET;i++) {
+	// socket 对象初始化填充
+	for (int i=0;i<MAX_SOCKET;i++) {
 		struct socket *s = &ss->slot[i];
 		ATOM_INIT(&s->type, SOCKET_TYPE_INVALID);
 		clear_wb_list(&s->high);
@@ -556,6 +570,7 @@ enable_read(struct socket_server *ss, struct socket *s, bool enable) {
 	return 0;
 }
 
+/// @brief 构建新的 socket 实例（取一个空闲的 socket 进行填充）
 static struct socket *
 new_fd(struct socket_server *ss, int id, int fd, int protocol, uintptr_t opaque, bool reading) {
 	struct socket * s = &ss->slot[HASH_ID(id)];
@@ -602,6 +617,9 @@ stat_write(struct socket_server *ss, struct socket *s, int n) {
 }
 
 // return -1 when connecting
+
+/// @brief 'O'网络命令处理函数，调用connet()发起连接
+/// @return 成功: SOCKET_OPEN; 错误: SOCKET_ERR; -1: 正在连接状态
 static int
 open_socket(struct socket_server *ss, struct request_open * request, struct socket_message *result) {
 	int id = request->id;
@@ -621,6 +639,7 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 	ai_hints.ai_socktype = SOCK_STREAM;
 	ai_hints.ai_protocol = IPPROTO_TCP;
 
+	// 拿到目标主机的全部地址，然后依此对每个地址尝试去建立连接
 	status = getaddrinfo( request->host, port, &ai_hints, &ai_list );
 	if ( status != 0 ) {
 		result->data = (void *)gai_strerror(status);
@@ -635,6 +654,7 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 		socket_keepalive(sock);
 		sp_nonblocking(sock);
 		status = connect( sock, ai_ptr->ai_addr, ai_ptr->ai_addrlen);
+		// EINPROGRESS 表示无法马上建立连接，正在尝试建立连接中
 		if ( status != 0 && errno != EINPROGRESS) {
 			close(sock);
 			sock = -1;
@@ -655,6 +675,7 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 	}
 
 	if(status == 0) {
+		// 连接已经建立成功
 		ATOM_STORE(&ns->type , SOCKET_TYPE_CONNECTED);
 		struct sockaddr * addr = ai_ptr->ai_addr;
 		void * sin_addr = (ai_ptr->ai_family == AF_INET) ? (void*)&((struct sockaddr_in *)addr)->sin_addr : (void*)&((struct sockaddr_in6 *)addr)->sin6_addr;
@@ -664,11 +685,12 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 		freeaddrinfo( ai_list );
 		return SOCKET_OPEN;
 	} else {
+		// 连接正在建立，还未成功，使用事件轮询器监听套接字的可写事件
 		if (enable_write(ss, ns, true)) {
 			result->data = "enable write failed";
 			goto _failed;
 		}
-		ATOM_STORE(&ns->type , SOCKET_TYPE_CONNECTING);
+		ATOM_STORE(&ns->type , SOCKET_TYPE_CONNECTING);		// 设置正在连接状态
 	}
 
 	freeaddrinfo( ai_list );
@@ -1080,6 +1102,8 @@ send_socket(struct socket_server *ss, struct request_send * request, struct sock
 	return -1;
 }
 
+/// @brief 'L'网络命令处理函数（由于在具体的服务中已经创建了相关监听套接字，这里只把监听套接字加入到 epoll 管理中，并创建 socket 结构变量）
+/// @return 
 static int
 listen_socket(struct socket_server *ss, struct request_listen * request, struct socket_message *result) {
 	int id = request->id;
@@ -1088,6 +1112,9 @@ listen_socket(struct socket_server *ss, struct request_listen * request, struct 
 	if (s == NULL) {
 		goto _failed;
 	}
+
+	// 设置为 SOCKET_TYPE_PLISTEN 状态，这是一个中间状态，此时这个监听套接字还不能工作（因为没有调用accept()，也没添加到轮询器管理）
+	// 等待 'R' 命令时这个监听套接字开始工作，对应 lua 层的socket.start()
 	ATOM_STORE(&s->type , SOCKET_TYPE_PLISTEN);
 	result->opaque = request->opaque;
 	result->id = id;
@@ -1275,13 +1302,14 @@ block_readpipe(int pipefd, void *buffer, int sz) {
 	}
 }
 
+/// @brief 检查命令管道中是否有命令待处理
 static int
 has_cmd(struct socket_server *ss) {
 	struct timeval tv = {0,0};
 	int retval;
 
 	FD_SET(ss->recvctrl_fd, &ss->rfds);
-
+	// 这里的 select 仅仅是用来轮询文件描述符的状态，检查接收命令的管道的读端是否可读
 	retval = select(ss->recvctrl_fd+1, &ss->rfds, NULL, NULL, &tv);
 	if (retval == 1) {
 		return 1;
@@ -1361,17 +1389,23 @@ dec_sending_ref(struct socket_server *ss, int id) {
 	}
 }
 
-// return type
+/// @brief 处理通过命令管道接收到的命令
+/// @param ss 
+/// @param result 
+/// @return 返回-1表示命令执行成功且不需要通知关联的服务; 非-1则需要通知关联的服务
 static int
 ctrl_cmd(struct socket_server *ss, struct socket_message *result) {
 	int fd = ss->recvctrl_fd;
 	// the length of message is one byte, so 256 buffer size is enough.
-	uint8_t buffer[256];
-	uint8_t header[2];
+	uint8_t buffer[256];	// 数据体
+	uint8_t header[2];		// 数据头
+
+	// 先读数据头，得到命令类型和数据体长度，再读数据体
 	block_readpipe(fd, header, sizeof(header));
 	int type = header[0];
 	int len = header[1];
 	block_readpipe(fd, buffer, len);
+
 	// ctrl command only exist in local fd, so don't worry about endian.
 	switch (type) {
 	case 'R':
@@ -1544,6 +1578,8 @@ forward_message_udp(struct socket_server *ss, struct socket *s, struct socket_lo
 	return SOCKET_UDP;
 }
 
+/// @brief 正在连接状态的 socket 后续处理（建立连接成功/失败）
+/// @return SOCKET_OPEN: 成功;  SOCKET_ERR: 失败
 static int
 report_connect(struct socket_server *ss, struct socket *s, struct socket_lock *l, struct socket_message *result) {
 	int error;
@@ -1668,9 +1704,16 @@ clear_closed_event(struct socket_server *ss, struct socket_message * result, int
 }
 
 // return type
+
+/// @brief 获取 触发的事件/待处理的命令 以及 处理得到的结果数据（一次调用只会处理一个事件或者n个命令）
+/// @param ss 
+/// @param result [out]结果数据
+/// @param more 是否还有事件待处理，一次事件轮询得到所有事件处理完后将被置为0
+/// @return 处理结果类型
 int 
 socket_server_poll(struct socket_server *ss, struct socket_message * result, int * more) {
 	for (;;) {
+		// 处理网络命令（这里没有理解到，为什么已经使用epoll管理了命令管道fd，触发后不直接调用，反而再使用select检查后再调用的意义）
 		if (ss->checkctrl) {
 			if (has_cmd(ss)) {
 				int type = ctrl_cmd(ss, result);
@@ -1683,8 +1726,10 @@ socket_server_poll(struct socket_server *ss, struct socket_message * result, int
 				ss->checkctrl = 0;
 			}
 		}
+
+		// 一轮事件轮询的所有事件处理完毕以后的操作
 		if (ss->event_index == ss->event_n) {
-			ss->event_n = sp_wait(ss->event_fd, ss->ev, MAX_EVENT);
+			ss->event_n = sp_wait(ss->event_fd, ss->ev, MAX_EVENT);		// 开启下一轮轮询
 			ss->checkctrl = 1;
 			if (more) {
 				*more = 0;
@@ -1699,9 +1744,12 @@ socket_server_poll(struct socket_server *ss, struct socket_message * result, int
 				continue;
 			}
 		}
+
+		// 处理一个触发事件
 		struct event *e = &ss->ev[ss->event_index++];
 		struct socket *s = e->s;
 		if (s == NULL) {
+			// 如果是命令管道fd触发的事件，将会到达这里，直接转到下次循环先执行管道中的网络命令
 			// dispatch pipe message at beginning
 			continue;
 		}
@@ -1820,6 +1868,13 @@ open_request(struct socket_server *ss, struct request_package *req, uintptr_t op
 	return len;
 }
 
+/// @brief 主动发起一个对外连接（将会封装一个'O'命令请求包通过命令管道发送给 socket 线程，又 socket 处理命令请求包，调用 connet() 发起网络连接）
+/// @brief 对应 lua 层的 socket.connect()
+/// @param ss 
+/// @param opaque 发起这个连接的服务的 handle
+/// @param addr 目标主机
+/// @param port 目标端口
+/// @return 
 int 
 socket_server_connect(struct socket_server *ss, uintptr_t opaque, const char * addr, int port) {
 	struct request_package request;
@@ -2017,6 +2072,14 @@ do_listen(const char * host, int port, int backlog) {
 	return listen_fd;
 }
 
+/// @brief 开启一个监听套接字（socket() -> bind() -> listen()操作，发送'L'命令请求包 -> socket 线程）
+/// @brief 对应 lua 层的 socket.listen()
+/// @param ss 
+/// @param opaque 服务handle
+/// @param addr 监听地址
+/// @param port 监听端口
+/// @param backlog 是否阻塞
+/// @return 
 int 
 socket_server_listen(struct socket_server *ss, uintptr_t opaque, const char * addr, int port, int backlog) {
 	int fd = do_listen(addr, port, backlog);

@@ -34,7 +34,10 @@ skynet_socket_updatetime() {
 	socket_server_updatetime(SOCKET_SERVER, skynet_now());
 }
 
-// mainloop thread
+/// @brief 将触发的事件和事件的数据结果，打包成一条服务间的 skynet_message 消息，发送给指定的服务
+/// @param type 消息类型
+/// @param padding 是否需要填充
+/// @param result 事件轮询器处理事件的数据结果
 static void
 forward_message(int type, bool padding, struct socket_message * result) {
 	struct skynet_socket_message *sm;
@@ -42,6 +45,7 @@ forward_message(int type, bool padding, struct socket_message * result) {
 	if (padding) {
 		if (result->data) {
 			size_t msg_sz = strlen(result->data);
+			// 消息数据长度限制不能超过 128
 			if (msg_sz > 128) {
 				msg_sz = 128;
 			}
@@ -56,17 +60,20 @@ forward_message(int type, bool padding, struct socket_message * result) {
 	sm->ud = result->ud;
 	if (padding) {
 		sm->buffer = NULL;
+		// 把 data 的数据追到 sm 的最后面
 		memcpy(sm+1, result->data, sz - sizeof(*sm));
 	} else {
 		sm->buffer = result->data;
 	}
 
+	// 构造一条新的 skynet_message 消息
 	struct skynet_message message;
 	message.source = 0;
 	message.session = 0;
 	message.data = sm;
 	message.sz = sz | ((size_t)PTYPE_SOCKET << MESSAGE_TYPE_SHIFT);
 	
+	// push 到对应服务的消息队列中
 	if (skynet_context_push((uint32_t)result->opaque, &message)) {
 		// todo: report somewhere to close socket
 		// don't call skynet_socket_close here (It will block mainloop)
@@ -80,7 +87,7 @@ skynet_socket_poll() {
 	struct socket_server *ss = SOCKET_SERVER;
 	assert(ss);
 	struct socket_message result;
-	int more = 1;
+	int more = 1;	// 还有剩余事件没处理完的标记
 	int type = socket_server_poll(ss, &result, &more);
 	switch (type) {
 	case SOCKET_EXIT:
